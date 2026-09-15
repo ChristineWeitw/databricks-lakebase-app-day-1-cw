@@ -28,6 +28,9 @@ _w = WorkspaceClient()
 
 TABLE_NAME = os.environ.get("MASSIVE_TABLE_NAME", "massive_records")
 WATCHLIST_TABLE_NAME = os.environ.get("WATCHLIST_TABLE_NAME", "watchlist")
+TICKETS_TABLE_NAME = os.environ.get("TICKETS_TABLE_NAME", "tickets")
+TICKET_MESSAGES_TABLE_NAME = os.environ.get("TICKET_MESSAGES_TABLE_NAME", "ticket_messages")
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "demo")  # Get free key at https://finnhub.io
 
 # Basic stock ticker shape check: 1-10 uppercase letters, with an optional
 # ".X" or ".XX" share-class suffix (e.g. "BRK.B"). This rejects obviously
@@ -63,6 +66,37 @@ def ensure_watchlist_table():
     )
 
 
+def ensure_tickets_table():
+    """Create the tickets table in Lakebase if it doesn't exist yet."""
+    lakebase.run_write(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TICKETS_TABLE_NAME} (
+            ticket_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+
+
+def ensure_ticket_messages_table():
+    """Create the ticket_messages table in Lakebase if it doesn't exist yet."""
+    lakebase.run_write(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TICKET_MESSAGES_TABLE_NAME} (
+            message_id SERIAL PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            message_text TEXT NOT NULL,
+            author TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            FOREIGN KEY (ticket_id) REFERENCES {TICKETS_TABLE_NAME}(ticket_id)
+        )
+        """
+    )
+
+
 def _current_user_email() -> str:
     """
     Resolve the current user's email so the watchlist can be personalized.
@@ -75,6 +109,48 @@ def _current_user_email() -> str:
     if header_email:
         return header_email
     return _w.current_user.me().user_name
+
+
+def fetch_stock_news(symbol: str, limit: int = 10) -> list[dict]:
+    """
+    Fetch stock news from Finnhub API for the given symbol.
+    
+    Returns a list of news articles with headline, summary, source, and datetime.
+    Get a free API key at https://finnhub.io (60 calls/minute on free tier).
+    """
+    url = f"https://finnhub.io/api/v1/company-news"
+    
+    # Get news from the last 30 days
+    from datetime import datetime, timedelta
+    to_date = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    params = {
+        "symbol": symbol,
+        "from": from_date,
+        "to": to_date,
+        "token": FINNHUB_API_KEY
+    }
+    
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        news_data = resp.json()
+        
+        # Limit results and format for our use case
+        return [
+            {
+                "headline": item.get("headline", ""),
+                "summary": item.get("summary", ""),
+                "source": item.get("source", ""),
+                "url": item.get("url", ""),
+                "datetime": item.get("datetime", 0)  # Unix timestamp
+            }
+            for item in (news_data if isinstance(news_data, list) else [])[:limit]
+        ]
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch news for {symbol}: {e}")
+        return []
 
 
 @app.route("/healthz")
@@ -169,14 +245,81 @@ def delete_from_watchlist(symbol):
     return jsonify({"symbol": symbol, "status": "deleted"})
 
 
+@app.route("/ticker/<symbol>/news", methods=["POST"])
+def get_stock_news(symbol):
+    """
+    Fetch stock news for a ticker symbol from Finnhub API and store it in
+    the ticket_messages table. Also ensures the ticker exists in tickets table.
+    """
+    ensure_tickets_table()
+    ensure_ticket_messages_table()
+    
+    symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
+    
+    if not symbol or not _TICKER_RE.match(symbol):
+        return jsonify({"error": f"Invalid ticker symbol: {symbol!r}"}), 400
+    
+    email = _current_user_email()
+    
+    # Ensure the ticket exists
+    lakebase.run_write(
+        f"""
+        INSERT INTO {TICKETS_TABLE_NAME} (ticket_id, title, status, created_by, created_at)
+        VALUES (%s, %s, %s, %s, now())
+        ON CONFLICT (ticket_id) DO NOTHING
+        """,
+        (symbol, f"{symbol} Stock", "active", email),
+    )
+    
+    # Fetch news from Finnhub
+    news_articles = fetch_stock_news(symbol, limit=10)
+    
+    if not news_articles:
+        return jsonify({"error": f"No news found for ticker: {symbol}"}), 404
+    
+    # Store news articles in ticket_messages table
+    import json as _json
+    from datetime import datetime
+    
+    stored_count = 0
+    for article in news_articles:
+        message_text = _json.dumps({
+            "headline": article.get("headline", ""),
+            "summary": article.get("summary", ""),
+            "url": article.get("url", ""),
+            "datetime": article.get("datetime", 0)
+        })
+        author = article.get("source", "Unknown")
+        
+        # Convert Unix timestamp to PostgreSQL timestamp
+        article_time = datetime.fromtimestamp(article.get("datetime", 0)) if article.get("datetime") else datetime.now()
+        
+        lakebase.run_write(
+            f"""
+            INSERT INTO {TICKET_MESSAGES_TABLE_NAME} (ticket_id, message_text, author, created_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (symbol, message_text, author, article_time),
+        )
+        stored_count += 1
+    
+    return jsonify({
+        "symbol": symbol,
+        "news_count": stored_count,
+        "news": news_articles
+    })
+
+
 @app.route("/watchlist", methods=["POST"])
 def add_to_watchlist():
     """
     Fetch the latest price for a single stock symbol from Massive using
     exactly ONE API call (see MassiveClient.get_latest_price), then add/
     update that symbol on the watchlist in Lakebase.
+    Also creates/updates a ticket entry for this symbol.
     """
     ensure_watchlist_table()
+    ensure_tickets_table()
 
     if request.is_json:
         symbol = request.json.get("symbol", "")
@@ -203,6 +346,18 @@ def add_to_watchlist():
 
     email = _current_user_email()
 
+    # Insert/update the ticket entry
+    lakebase.run_write(
+        f"""
+        INSERT INTO {TICKETS_TABLE_NAME} (ticket_id, title, status, created_by, created_at)
+        VALUES (%s, %s, %s, %s, now())
+        ON CONFLICT (ticket_id) DO UPDATE
+            SET status = EXCLUDED.status
+        """,
+        (symbol, f"{symbol} Stock", "active", email),
+    )
+
+    # Insert/update the watchlist entry
     lakebase.run_write(
         f"""
         INSERT INTO {WATCHLIST_TABLE_NAME} (symbol, email, latest_price, updated_at)

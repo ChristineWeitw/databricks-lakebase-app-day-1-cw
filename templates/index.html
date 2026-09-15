@@ -207,6 +207,65 @@
       border-top: 2px solid #f3f4f6;
     }
     
+    .news-container {
+      margin-top: 24px;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+    
+    .news-article {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+      transition: all 0.2s ease;
+    }
+    
+    .news-article:hover {
+      border-color: #667eea;
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
+      transform: translateY(-2px);
+    }
+    
+    .news-headline {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1a1a2e;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    
+    .news-summary {
+      font-size: 14px;
+      color: #6b7280;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+    
+    .news-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    
+    .news-source {
+      font-weight: 600;
+      color: #667eea;
+    }
+    
+    .news-link {
+      color: #667eea;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    
+    .news-link:hover {
+      text-decoration: underline;
+    }
+    
     @media (max-width: 640px) {
       body {
         padding: 20px 16px;
@@ -256,12 +315,28 @@
       </thead>
       <tbody id="watchlist-body"></tbody>
     </table>
+
+    <h2 class="section-title">📰 Stock News</h2>
+    <p class="hint">Get the latest news articles for any stock ticker.</p>
+
+    <form id="news-form">
+      <label for="news-symbol">Ticker Symbol for News</label>
+      <input type="text" id="news-symbol" name="news-symbol" placeholder="TSLA" required>
+      <button type="submit">Get News</button>
+    </form>
+
+    <div id="news-result"></div>
+
+    <div id="news-container" class="news-container"></div>
   </div>
 
   <script>
     const form = document.getElementById("stock-form");
     const resultEl = document.getElementById("result");
     const watchlistBody = document.getElementById("watchlist-body");
+    const newsForm = document.getElementById("news-form");
+    const newsResultEl = document.getElementById("news-result");
+    const newsContainer = document.getElementById("news-container");
 
     async function loadWatchlist() {
       try {
@@ -339,6 +414,58 @@
       } catch (err) {
         resultEl.className = "error";
         resultEl.textContent = "Request failed: " + err;
+      }
+    });
+
+    newsForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const symbol = document.getElementById("news-symbol").value.trim().toUpperCase();
+      newsResultEl.textContent = "Fetching news...";
+      newsResultEl.className = "";
+      newsContainer.innerHTML = "";
+
+      try {
+        const resp = await fetch(`/ticker/${symbol}/news`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          newsResultEl.className = "error";
+          newsResultEl.textContent = "Error: " + (data.error || resp.statusText);
+          return;
+        }
+        newsResultEl.className = "";
+        newsResultEl.textContent = `✓ Found ${data.news_count} news articles for ${data.symbol}`;
+        document.getElementById("news-symbol").value = "";
+        
+        // Display news articles
+        if (data.news && data.news.length > 0) {
+          data.news.forEach((article) => {
+            const articleEl = document.createElement("div");
+            articleEl.className = "news-article";
+            
+            const headline = article.headline || "No headline";
+            const summary = article.summary || "No summary available";
+            const source = article.source || "Unknown";
+            const url = article.url || "#";
+            const datetime = article.datetime ? new Date(article.datetime * 1000).toLocaleString() : "";
+            
+            articleEl.innerHTML = `
+              <div class="news-headline">${headline}</div>
+              <div class="news-summary">${summary.substring(0, 200)}${summary.length > 200 ? '...' : ''}</div>
+              <div class="news-meta">
+                <span class="news-source">${source}</span>
+                <span>${datetime}</span>
+                <a href="${url}" target="_blank" class="news-link">Read more →</a>
+              </div>
+            `;
+            newsContainer.appendChild(articleEl);
+          });
+        }
+      } catch (err) {
+        newsResultEl.className = "error";
+        newsResultEl.textContent = "Request failed: " + err;
       }
     });
 
