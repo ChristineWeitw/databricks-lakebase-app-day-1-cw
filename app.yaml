@@ -13,3 +13,5 @@ env:
     value: "massive"
   - name: MASSIVE_SECRET_KEY
     value: "api-key"
+  - name: FINNHUB_API_KEY
+    valueFrom: "{{secrets/finnhub/api-key}}"
