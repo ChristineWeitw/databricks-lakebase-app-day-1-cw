@@ -30,7 +30,10 @@ TABLE_NAME = os.environ.get("MASSIVE_TABLE_NAME", "massive_records")
 WATCHLIST_TABLE_NAME = os.environ.get("WATCHLIST_TABLE_NAME", "watchlist")
 TICKETS_TABLE_NAME = os.environ.get("TICKETS_TABLE_NAME", "tickets")
 TICKET_MESSAGES_TABLE_NAME = os.environ.get("TICKET_MESSAGES_TABLE_NAME", "ticket_messages")
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "demo")  # Get free key at https://finnhub.io
+
+# Finnhub secret configuration
+FINNHUB_SECRET_SCOPE = os.environ.get("FINNHUB_SECRET_SCOPE", "finnhub")
+FINNHUB_SECRET_KEY = os.environ.get("FINNHUB_SECRET_KEY", "api-key")
 
 # Basic stock ticker shape check: 1-10 uppercase letters, with an optional
 # ".X" or ".XX" share-class suffix (e.g. "BRK.B"). This rejects obviously
@@ -111,6 +114,20 @@ def _current_user_email() -> str:
     return _w.current_user.me().user_name
 
 
+def _get_finnhub_api_key() -> str:
+    """
+    Fetch the Finnhub API key from Databricks secrets.
+    Falls back to 'demo' for local development (though demo keys don't work).
+    """
+    try:
+        import base64
+        secret = _w.secrets.get_secret(scope=FINNHUB_SECRET_SCOPE, key=FINNHUB_SECRET_KEY)
+        return base64.b64decode(secret.value).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"Could not fetch Finnhub API key from secrets: {e}")
+        return "demo"  # Fallback for local dev (won't work but prevents crashes)
+
+
 def fetch_stock_news(symbol: str, limit: int = 10) -> list[dict]:
     """
     Fetch stock news from Finnhub API for the given symbol.
@@ -129,7 +146,7 @@ def fetch_stock_news(symbol: str, limit: int = 10) -> list[dict]:
         "symbol": symbol,
         "from": from_date,
         "to": to_date,
-        "token": FINNHUB_API_KEY
+        "token": _get_finnhub_api_key()
     }
     
     try:
